@@ -28,16 +28,34 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ---- Core logic (same as local version) ----
-def find_jj_data(file_obj):
+
+# ---- Parse the combined multi-day CSV ----
+def parse_combined_csv(file_obj):
     content = file_obj.read().decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(content)))
 
-    jj_items = []
-    jj_subtotal = None
+    header = rows[0]
+    date_cols = {}  # date_str -> (qty_idx, amount_idx, gp_idx)
+    col = 7
+    while col < len(header):
+        date_str = header[col].strip()
+        if date_str:
+            date_cols[date_str] = (col, col + 1, col + 2)
+        col += 3
+
+    TOTAL_AMOUNT_IDX = 5
+
+    jj_items = []          # list of (item_code, item_name, qty_by_date dict)
+    jj_total_amount = None
+    jj_daily_by_date = {}  # date_str -> amount string
     inside_jj = False
 
-    for row in rows:
+    def clean_num(v):
+        if not v:
+            return ""
+        return v.replace(",", "").replace("(", "-").replace(")", "")
+
+    for row in rows[2:]:
         if not row:
             continue
         first_cell = row[0].strip()
@@ -49,26 +67,41 @@ def find_jj_data(file_obj):
 
         if inside_jj:
             if first_cell == "Sub Sub Total":
-                jj_subtotal = row[5].replace(",", "").replace("(", "-").replace(")", "")
+                jj_total_amount = clean_num(row[TOTAL_AMOUNT_IDX]) or "0"
+                for date_str, (qcol, acol, gcol) in date_cols.items():
+                    amt = row[acol] if acol < len(row) else ""
+                    jj_daily_by_date[date_str] = clean_num(amt) or "0"
                 inside_jj = False
             elif first_cell.isdigit():
                 item_code = row[1]
                 item_name = row[2]
-                qty = row[3]
-                jj_items.append((item_code, item_name, qty))
+                qty_by_date = {}
+                for date_str, (qcol, acol, gcol) in date_cols.items():
+                    q = row[qcol] if qcol < len(row) else ""
+                    qty_by_date[date_str] = q.strip()
+                jj_items.append((item_code, item_name, qty_by_date))
             elif first_line != "" and not first_cell.isdigit():
                 inside_jj = False
 
-    return jj_subtotal, jj_items
+    return jj_total_amount, jj_daily_by_date, jj_items, list(date_cols.keys())
 
 
-def build_unit_sold_lines(items):
+def build_unit_sold_lines_for_date(items, selected_date):
     nb_brand_counts = defaultdict(int)
     sw_count = 0
     cp_count = 0
 
-    for code, name, qty in items:
-        qty = int(qty)
+    for code, name, qty_by_date in items:
+        q = qty_by_date.get(selected_date, "").strip()
+        if not q:
+            continue
+        try:
+            qty = int(float(q))
+        except ValueError:
+            continue
+        if qty <= 0:
+            continue
+
         if code.startswith("NB-"):
             parts = code.split("-")
             brand = parts[1] if len(parts) > 1 else "UNKNOWN"
@@ -105,43 +138,53 @@ def write_branch_to_excel(wb, daily_cell, utd_cell, unit_sold_start_cell, unit_s
         ws[f"{start_col}{start_row + i}"] = line
 
 
-def render_branch_section(branch_name, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows, excel_bytes):
+def render_branch_section(branch_name, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows, wb):
     st.subheader(f"🏬 {branch_name} Branch")
 
-    daily_key = f"daily_{branch_name}"
-    monthly_key = f"monthly_{branch_name}"
+    file_key = f"combined_{branch_name}"
     pending_key = f"pending_{branch_name}"
 
-    daily_file = st.file_uploader(f"[{branch_name}] Upload DAILY export CSV", type="csv", key=daily_key)
-    monthly_file = st.file_uploader(f"[{branch_name}] Upload MONTHLY export CSV (JJ-filtered)", type="csv", key=monthly_key)
+    combined_file = st.file_uploader(f"[{branch_name}] Upload combined CSV export (Day 1 to today)", type="csv", key=file_key)
 
-    if st.button(f"Preview {branch_name}", key=f"preview_btn_{branch_name}"):
-        if daily_file and monthly_file:
-            daily_total, daily_items = find_jj_data(daily_file)
-            monthly_total, _ = find_jj_data(monthly_file)
-            unit_sold_lines = build_unit_sold_lines(daily_items)
+    if combined_file:
+        jj_total_amount, jj_daily_by_date, jj_items, all_dates = parse_combined_csv(combined_file)
+
+        dates_with_data = [d for d in all_dates if jj_daily_by_date.get(d, "0") not in ("0", "", "-0")]
+        default_date = dates_with_data[-1] if dates_with_data else all_dates[-1]
+        default_index = all_dates.index(default_date)
+
+        selected_date = st.selectbox(
+            f"[{branch_name}] Select report date",
+            options=all_dates,
+            index=default_index,
+            key=f"date_select_{branch_name}"
+        )
+
+        if st.button(f"Preview {branch_name}", key=f"preview_btn_{branch_name}"):
+            daily_total = jj_daily_by_date.get(selected_date, "0")
+            unit_sold_lines = build_unit_sold_lines_for_date(jj_items, selected_date)
 
             st.session_state[pending_key] = {
                 "daily_total": daily_total,
-                "monthly_total": monthly_total,
+                "monthly_total": jj_total_amount,
                 "unit_sold_lines": unit_sold_lines
             }
 
-            st.write(f"**DAILY:** RM {daily_total}")
-            st.write(f"**UTD:** RM {monthly_total}")
+            st.write(f"**DAILY ({selected_date}):** RM {daily_total}")
+            st.write(f"**UTD:** RM {jj_total_amount}")
             st.write("**Unit Sold:**")
             if unit_sold_lines:
                 for line in unit_sold_lines:
                     st.write(f"- {line}")
             else:
                 st.write("- (none)")
-        else:
-            st.warning(f"Please upload both {branch_name} files first.")
+    else:
+        st.info(f"Upload {branch_name}'s combined CSV to get started.")
 
     if pending_key in st.session_state:
         data = st.session_state[pending_key]
         write_branch_to_excel(
-            excel_bytes, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows,
+            wb, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows,
             data["daily_total"], data["monthly_total"], data["unit_sold_lines"]
         )
 
