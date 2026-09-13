@@ -29,13 +29,37 @@ if not check_password():
     st.stop()
 
 
-# ---- Parse the combined multi-day CSV ----
-def parse_combined_csv(file_obj):
+BRAND_CELLS = {
+    "ACER": {"daily": "B6", "utd": "B7", "unit_sold_start": "B13", "unit_sold_rows": 4},
+    "HP":   {"daily": "G6", "utd": "G7", "unit_sold_start": "G13", "unit_sold_rows": 4},
+    "MSI":  {"daily": "K6", "utd": "K7", "unit_sold_start": "K13", "unit_sold_rows": 4},
+}
+
+
+def clean_num(v):
+    if not v:
+        return "0"
+    v = v.replace(",", "").replace("(", "-").replace(")", "")
+    return v if v else "0"
+
+
+def detect_brand(identifier):
+    ident = identifier.upper()
+    if "ACER" in ident:
+        return "ACER"
+    elif "MSI" in ident:
+        return "MSI"
+    elif "HP" in ident:
+        return "HP"
+    return None
+
+
+def parse_multibranch_csv(file_obj):
     content = file_obj.read().decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(content)))
 
     header = rows[0]
-    date_cols = {}  # date_str -> (qty_idx, amount_idx, gp_idx)
+    date_cols = {}
     col = 7
     while col < len(header):
         date_str = header[col].strip()
@@ -45,45 +69,43 @@ def parse_combined_csv(file_obj):
 
     TOTAL_AMOUNT_IDX = 5
 
-    jj_items = []          # list of (item_code, item_name, qty_by_date dict)
-    jj_total_amount = None
-    jj_daily_by_date = {}  # date_str -> amount string
-    inside_jj = False
+    brand_data = {
+        "ACER": {"total_amount": 0.0, "daily_by_date": defaultdict(float), "items": []},
+        "HP": {"total_amount": 0.0, "daily_by_date": defaultdict(float), "items": []},
+        "MSI": {"total_amount": 0.0, "daily_by_date": defaultdict(float), "items": []},
+    }
 
-    def clean_num(v):
-        if not v:
-            return ""
-        return v.replace(",", "").replace("(", "-").replace(")", "")
+    current_brand = None
 
-    for row in rows[2:]:
-        if not row:
+    for row in rows[1:]:
+        if not row or not row[0].strip():
             continue
-        first_cell = row[0].strip()
-        first_line = first_cell.split("\n")[0].strip()
+        no_field = row[0].strip()
 
-        if first_line == "JJ":
-            inside_jj = True
-            continue
+        if no_field == "GRAND TOTAL":
+            break
 
-        if inside_jj:
-            if first_cell == "Sub Sub Total":
-                jj_total_amount = clean_num(row[TOTAL_AMOUNT_IDX]) or "0"
+        if "." not in no_field and no_field.replace("-", "").isdigit():
+            branch_id = row[1].strip()
+            brand = detect_brand(branch_id)
+            current_brand = brand
+            if brand:
+                total_amt = float(clean_num(row[TOTAL_AMOUNT_IDX]))
+                brand_data[brand]["total_amount"] += total_amt
                 for date_str, (qcol, acol, gcol) in date_cols.items():
-                    amt = row[acol] if acol < len(row) else ""
-                    jj_daily_by_date[date_str] = clean_num(amt) or "0"
-                inside_jj = False
-            elif first_cell.isdigit():
+                    amt_str = row[acol] if acol < len(row) else ""
+                    brand_data[brand]["daily_by_date"][date_str] += float(clean_num(amt_str))
+        else:
+            if current_brand:
                 item_code = row[1]
                 item_name = row[2]
                 qty_by_date = {}
                 for date_str, (qcol, acol, gcol) in date_cols.items():
                     q = row[qcol] if qcol < len(row) else ""
                     qty_by_date[date_str] = q.strip()
-                jj_items.append((item_code, item_name, qty_by_date))
-            elif first_line != "" and not first_cell.isdigit():
-                inside_jj = False
+                brand_data[current_brand]["items"].append((item_code, item_name, qty_by_date))
 
-    return jj_total_amount, jj_daily_by_date, jj_items, list(date_cols.keys())
+    return brand_data, list(date_cols.keys())
 
 
 def build_unit_sold_lines_for_date(items, selected_date):
@@ -138,79 +160,68 @@ def write_branch_to_excel(wb, daily_cell, utd_cell, unit_sold_start_cell, unit_s
         ws[f"{start_col}{start_row + i}"] = line
 
 
-def render_branch_section(branch_name, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows, wb):
-    st.subheader(f"🏬 {branch_name} Branch")
+st.write("Upload your current Excel report and the combined multi-branch CSV export (JJ only), then review and save.")
 
-    file_key = f"combined_{branch_name}"
-    pending_key = f"pending_{branch_name}"
+excel_upload = st.file_uploader("Upload your Excel report (.xlsx)", type="xlsx", key="excel_upload")
+csv_upload = st.file_uploader("Upload combined multi-branch CSV export (JJ only)", type="csv", key="csv_upload")
 
-    combined_file = st.file_uploader(f"[{branch_name}] Upload combined CSV export (Day 1 to today)", type="csv", key=file_key)
+if excel_upload and csv_upload:
+    wb = openpyxl.load_workbook(excel_upload)
+    brand_data, all_dates = parse_multibranch_csv(csv_upload)
 
-    if combined_file:
-        jj_total_amount, jj_daily_by_date, jj_items, all_dates = parse_combined_csv(combined_file)
+    def total_for_date(d):
+        return sum(brand_data[b]["daily_by_date"].get(d, 0) for b in brand_data)
 
-        dates_with_data = [d for d in all_dates if jj_daily_by_date.get(d, "0") not in ("0", "", "-0")]
-        default_date = dates_with_data[-1] if dates_with_data else all_dates[-1]
-        default_index = all_dates.index(default_date)
+    dates_with_data = [d for d in all_dates if total_for_date(d) > 0]
+    default_date = dates_with_data[-1] if dates_with_data else all_dates[-1]
+    default_index = all_dates.index(default_date)
 
-        selected_date = st.selectbox(
-            f"[{branch_name}] Select report date",
-            options=all_dates,
-            index=default_index,
-            key=f"date_select_{branch_name}"
-        )
+    selected_date = st.selectbox("Select report date", options=all_dates, index=default_index)
 
-        if st.button(f"Preview {branch_name}", key=f"preview_btn_{branch_name}"):
-            daily_total = jj_daily_by_date.get(selected_date, "0")
-            unit_sold_lines = build_unit_sold_lines_for_date(jj_items, selected_date)
-
-            st.session_state[pending_key] = {
+    if st.button("Preview All Branches"):
+        results = {}
+        for brand, cells in BRAND_CELLS.items():
+            data = brand_data[brand]
+            daily_total = data["daily_by_date"].get(selected_date, 0)
+            utd_total = data["total_amount"]
+            unit_sold_lines = build_unit_sold_lines_for_date(data["items"], selected_date)
+            results[brand] = {
                 "daily_total": daily_total,
-                "monthly_total": jj_total_amount,
+                "monthly_total": utd_total,
                 "unit_sold_lines": unit_sold_lines
             }
-
-            st.write(f"**DAILY ({selected_date}):** RM {daily_total}")
-            st.write(f"**UTD:** RM {jj_total_amount}")
+            st.write(f"### {brand}")
+            st.write(f"**DAILY ({selected_date}):** RM {daily_total:.2f}")
+            st.write(f"**UTD:** RM {utd_total:.2f}")
             st.write("**Unit Sold:**")
             if unit_sold_lines:
                 for line in unit_sold_lines:
                     st.write(f"- {line}")
             else:
                 st.write("- (none)")
-    else:
-        st.info(f"Upload {branch_name}'s combined CSV to get started.")
 
-    if pending_key in st.session_state:
-        data = st.session_state[pending_key]
-        write_branch_to_excel(
-            wb, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows,
-            data["daily_total"], data["monthly_total"], data["unit_sold_lines"]
-        )
+        st.session_state["pending_all"] = results
 
-    st.divider()
-
-
-st.write("Upload your current Excel report, fill in each branch below, then download the updated file at the bottom.")
-
-excel_upload = st.file_uploader("Upload your Excel report (.xlsx)", type="xlsx", key="excel_upload")
-
-if excel_upload:
-    wb = openpyxl.load_workbook(excel_upload)
-
-    render_branch_section("ACER", "B6", "B7", "B13", 4, wb)
-    render_branch_section("HP", "G6", "G7", "G13", 4, wb)
-    render_branch_section("MSI", "K6", "K7", "K13", 4, wb)
-
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-
-    st.download_button(
-        label="⬇️ Download Updated Excel File",
-        data=output,
-        file_name="JJ_SALES_REPORT_UPDATED.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    if "pending_all" in st.session_state:
+        st.warning("This will overwrite the ACER, HP, and MSI blocks in the Excel file.")
+        if st.button("✅ Confirm & Save All"):
+            results = st.session_state["pending_all"]
+            for brand, cells in BRAND_CELLS.items():
+                data = results[brand]
+                write_branch_to_excel(
+                    wb, cells["daily"], cells["utd"], cells["unit_sold_start"], cells["unit_sold_rows"],
+                    data["daily_total"], data["monthly_total"], data["unit_sold_lines"]
+                )
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+            st.success("All branches updated!")
+            st.download_button(
+                label="⬇️ Download Updated Excel File",
+                data=output,
+                file_name=f"JJ_SALES_REPORT_{selected_date}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            del st.session_state["pending_all"]
 else:
-    st.info("Upload your Excel file above to get started.")
+    st.info("Upload both the Excel report and the combined CSV to get started.")
