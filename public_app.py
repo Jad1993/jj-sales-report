@@ -35,7 +35,7 @@ BRAND_CELLS = {
     "MSI":  {"daily": "K6", "utd": "K7", "unit_sold_start": "K13", "unit_sold_rows": 4},
 }
 
-KNOWN_PREFIXES = ("NB-", "SW-", "CP-")
+KNOWN_PREFIXES = ("NB-", "SW-", "CP-", "AIO-", "ADT-", "DC-", "CART-")
 
 
 def clean_num(v):
@@ -114,6 +114,10 @@ def build_unit_sold_lines_for_date(items, selected_date):
     nb_brand_counts = defaultdict(int)
     sw_count = 0
     cp_count = 0
+    aio_count = 0
+    adt_count = 0
+    dc_count = 0
+    cart_count = 0
 
     for code, name, qty_by_date in items:
         q = qty_by_date.get(selected_date, "").strip()
@@ -134,6 +138,14 @@ def build_unit_sold_lines_for_date(items, selected_date):
             sw_count += qty
         elif code.startswith("CP-"):
             cp_count += qty
+        elif code.startswith("AIO-"):
+            aio_count += qty
+        elif code.startswith("ADT-"):
+            adt_count += qty
+        elif code.startswith("DC-"):
+            dc_count += qty
+        elif code.startswith("CART-"):
+            cart_count += qty
 
     lines = []
     for brand, qty in nb_brand_counts.items():
@@ -142,12 +154,20 @@ def build_unit_sold_lines_for_date(items, selected_date):
         lines.append(f"ANTI VIRUS X{sw_count}")
     if cp_count > 0:
         lines.append(f"AEW CP X{cp_count}")
+    if aio_count > 0:
+        lines.append(f"AIO X{aio_count}")
+    if adt_count > 0:
+        lines.append(f"ADT X{adt_count}")
+    if dc_count > 0:
+        lines.append(f"DC X{dc_count}")
+    if cart_count > 0:
+        lines.append(f"CART X{cart_count}")
 
     return lines
 
 
 def build_other_items_summary(items, selected_date):
-    """Groups every item NOT matching NB-/SW-/CP- by its code prefix, for review purposes."""
+    """Groups every item NOT matching a known prefix, for review purposes."""
     prefix_counts = defaultdict(int)
     prefix_examples = {}
 
@@ -242,7 +262,7 @@ if excel_upload and csv_upload:
                         st.write(f"- {line}")
                     st.caption("Tell me which of these prefixes you want added to the official Unit Sold rule.")
                 else:
-                    st.write("(none — everything sold today is already covered by NB/SW/CP)")
+                    st.write("(none — everything sold today is already covered)")
 
         st.session_state["pending_all"] = results
 
