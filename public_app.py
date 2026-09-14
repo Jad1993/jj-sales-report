@@ -35,6 +35,8 @@ BRAND_CELLS = {
     "MSI":  {"daily": "K6", "utd": "K7", "unit_sold_start": "K13", "unit_sold_rows": 4},
 }
 
+KNOWN_PREFIXES = ("NB-", "SW-", "CP-")
+
 
 def clean_num(v):
     if not v:
@@ -144,6 +146,38 @@ def build_unit_sold_lines_for_date(items, selected_date):
     return lines
 
 
+def build_other_items_summary(items, selected_date):
+    """Groups every item NOT matching NB-/SW-/CP- by its code prefix, for review purposes."""
+    prefix_counts = defaultdict(int)
+    prefix_examples = {}
+
+    for code, name, qty_by_date in items:
+        if code.startswith(KNOWN_PREFIXES):
+            continue
+
+        q = qty_by_date.get(selected_date, "").strip()
+        if not q:
+            continue
+        try:
+            qty = int(float(q))
+        except ValueError:
+            continue
+        if qty <= 0:
+            continue
+
+        prefix = code.split("-")[0] if "-" in code else code
+        prefix_counts[prefix] += qty
+        if prefix not in prefix_examples:
+            prefix_examples[prefix] = name
+
+    lines = []
+    for prefix, qty in sorted(prefix_counts.items()):
+        example = prefix_examples[prefix][:50]
+        lines.append(f"{prefix}- X{qty}  (e.g. {example}...)")
+
+    return lines
+
+
 def write_branch_to_excel(wb, daily_cell, utd_cell, unit_sold_start_cell, unit_sold_rows,
                            daily_total, monthly_total, unit_sold_lines):
     ws = wb["Sheet1"]
@@ -185,6 +219,8 @@ if excel_upload and csv_upload:
             daily_total = data["daily_by_date"].get(selected_date, 0)
             utd_total = data["total_amount"]
             unit_sold_lines = build_unit_sold_lines_for_date(data["items"], selected_date)
+            other_items = build_other_items_summary(data["items"], selected_date)
+
             results[brand] = {
                 "daily_total": daily_total,
                 "monthly_total": utd_total,
@@ -193,12 +229,20 @@ if excel_upload and csv_upload:
             st.write(f"### {brand}")
             st.write(f"**DAILY ({selected_date}):** RM {daily_total:.2f}")
             st.write(f"**UTD:** RM {utd_total:.2f}")
-            st.write("**Unit Sold:**")
+            st.write("**Unit Sold (will be saved to Excel):**")
             if unit_sold_lines:
                 for line in unit_sold_lines:
                     st.write(f"- {line}")
             else:
                 st.write("- (none)")
+
+            with st.expander(f"🔍 Other items sold ({brand}) — not yet in Unit Sold"):
+                if other_items:
+                    for line in other_items:
+                        st.write(f"- {line}")
+                    st.caption("Tell me which of these prefixes you want added to the official Unit Sold rule.")
+                else:
+                    st.write("(none — everything sold today is already covered by NB/SW/CP)")
 
         st.session_state["pending_all"] = results
 
